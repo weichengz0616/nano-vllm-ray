@@ -17,6 +17,10 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
 
+    executor_type: str = "mp"
+    ray_head_ip: str = "localhost"
+    ray_head_port: int = 6379
+
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
@@ -24,3 +28,4 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         assert self.max_num_batched_tokens >= self.max_model_len
+        assert self.executor_type == "mp" or self.executor_type == "ray"

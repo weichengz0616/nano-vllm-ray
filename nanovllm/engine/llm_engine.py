@@ -3,13 +3,12 @@ from dataclasses import fields
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
-import torch.multiprocessing as mp
 
 from nanovllm.config import Config
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
-from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.executor import MPExexutor, RayExecutor
 
 
 class LLMEngine:
@@ -18,26 +17,22 @@ class LLMEngine:
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
-        self.ps = []
-        self.events = []
-        ctx = mp.get_context("spawn")
-        for i in range(1, config.tensor_parallel_size):
-            event = ctx.Event()
-            process = ctx.Process(target=ModelRunner, args=(config, i, event))
-            process.start()
-            self.ps.append(process)
-            self.events.append(event)
-        self.model_runner = ModelRunner(config, 0, self.events)
+
+        if(config.executor_type == "mp"):
+            self.model_executor = MPExexutor(config)
+        elif(config.executor_type == "ray"):
+            self.model_executor = RayExecutor(config)
+        else:
+            assert False
+
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
         atexit.register(self.exit)
 
     def exit(self):
-        self.model_runner.call("exit")
-        del self.model_runner
-        for p in self.ps:
-            p.join()
+        self.model_executor.exit()
+        del self.model_executor
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         if isinstance(prompt, str):
@@ -47,7 +42,7 @@ class LLMEngine:
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
+        token_ids = self.model_executor.run(seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
